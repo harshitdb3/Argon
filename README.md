@@ -28,7 +28,7 @@ Open http://localhost:8080.
 
 How it works:
 1. In the game, click **Pocket Racket**. A QR code appears that links to `<server>/companion.html?room=<ID>&role=p1`. The image comes from `api.qrserver.com`.
-2. On the phone, open the companion page and tap **Enable Motion**. The page listens to `deviceorientation` and `devicemotion` events. On iOS you also get a permission prompt.
+2. On the phone, open the companion page and tap **Enable Gyro**. The page listens to `deviceorientation` and `devicemotion` events. On iOS you also get a permission prompt.
 3. The phone sends `POST /api/racket/telemetry` (tilt and acceleration, about 15 Hz). When it detects a swing or toss flick, it sends `POST /api/racket/swing`.
 4. The game in the desktop browser polls `GET /api/match/state` about every 45 ms and turns new swings into shots. Hit feedback goes back through `/api/racket/feedback`, which makes the phone vibrate.
 
@@ -49,7 +49,7 @@ ngrok http 8080                                     # prints https://<random>.ng
 cd argon-tennis && TUNNEL_URL=https://<random>.trycloudflare.com ./start.sh
 ```
 
-Then open the game (`http://localhost:8080` works on the desktop), click **Pocket Racket**, and scan the QR code. The server's QR link defaults to `http://localhost:8080`. If you forget `TUNNEL_URL`, paste the tunnel URL into the URL field in the Pocket Racket dialog instead.
+Then open the game (`http://localhost:8080` works on the desktop), click **Pocket Racket**, and scan the QR code. The server's QR link defaults to `http://localhost:8080`. You can also set it while the server is running: `curl -X POST localhost:8080/api/tunnel/url -d '{"tunnelUrl":"https://<random>.trycloudflare.com"}'`.
 
 Alternatively, deploy the included `Dockerfile` to any HTTPS container host (Cloud Run, Fly.io, Render, ...).
 
