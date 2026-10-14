@@ -51,7 +51,16 @@ cd argon-tennis && TUNNEL_URL=https://<random>.trycloudflare.com ./start.sh
 
 Then open the game (`http://localhost:8080` works on the desktop), click **Pocket Racket**, and scan the QR code. The server's QR link defaults to `http://localhost:8080`. You can also set it while the server is running: `curl -X POST localhost:8080/api/tunnel/url -d '{"tunnelUrl":"https://<random>.trycloudflare.com"}'`.
 
-Alternatively, deploy the included `Dockerfile` to any HTTPS container host (Cloud Run, Fly.io, Render, ...).
+### Deploy (permanent HTTPS link, works for phones)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/harshitdb3/Argon)
+
+`render.yaml` deploys `argon-tennis/` as a free Docker web service. The container picks up Render's
+`RENDER_EXTERNAL_URL` by itself, so the Pocket Racket QR code already points at the `https://….onrender.com` address.
+Open that address on your computer, click **Pocket Racket**, and scan the code with your phone.
+
+Other container hosts (Cloud Run, Fly.io, ...) work too: deploy `argon-tennis/Dockerfile` and set `TUNNEL_URL` to the
+service's public https URL. The server keeps rooms in memory, so they reset whenever the service restarts or sleeps.
 
 ### 1v1 multiplayer
 Each player opens `/?room=<ID>&role=p1` or `/?room=<ID>&role=p2` on the same (reachable) server, or uses `/join.html?room=<ID>`. Each player can pair a phone with `role=p1` or `role=p2`.
