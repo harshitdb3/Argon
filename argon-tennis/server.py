@@ -36,141 +36,125 @@ MIME_OVERRIDES = {
 }
 
 
+def _num(value, default: float = 0.0) -> float:
+  try:
+    out = float(value)
+  except (TypeError, ValueError):
+    return default
+  return out if out == out else default  # reject NaN
+
+
+def _now_ms() -> int:
+  return int(time.time() * 1000)
+
+
+def _is_p2(role) -> bool:
+  return str(role or "").lower() in ("p2", "2", "opponent", "guest")
+
+
 class RacketRelayState:
-  """Thread-safe relay for a single player's mobile phone motion controller."""
+  """Thread-safe relay for a single player's mobile phone motion controller.
+
+  The JSON shape matches what the browser client reads (src/motion_controls.js,
+  companion.html) and the relay in vite.config.ts.
+  """
+
+  CONNECTED_WINDOW_MS = 12000
 
   def __init__(self, role: str = "p1"):
     self.role = role
     self._lock = threading.Lock()
     self._seq = 0
+    self._last_seen_ms = 0
+    self._connected = False
+    self._orientation = {"pitch": 0.0, "roll": 0.0, "yaw": 0.0, "accelMag": 0.0, "buttonB": False}
     self._last_swing = None
-    self._connected_clients = 0
-    self._last_heartbeat = 0.0
-    self._telemetry_seq = 0
-    self._last_telemetry = {
-        "seq": 0,
-        "swingType": "flat",
-        "wristPitch": 0.0,
-        "wristRoll": 0.0,
-        "swingSpeed": 0.0,
-        "accelPeak": 0.0,
-        "aimX": 0.0,
-        "timestamp": 0.0,
-    }
+    self._swing_history = []
     self._feedback_seq = 0
     self._last_feedback = None
+
+  def record_swing(self, payload: dict) -> dict:
+    with self._lock:
+      now = _now_ms()
+      self._seq += 1
+      self._last_seen_ms = now
+      self._connected = True
+      is_toss = str(payload.get("type", "swing")).lower() == "toss"
+      angle_x = _num(payload.get("angleX", payload.get("dirX", payload.get("aimX", 0.0))))
+      swing = {
+          "seq": self._seq,
+          "role": self.role,
+          "type": "toss" if is_toss else "swing",
+          "side": str(payload.get("side") or ("backhand" if angle_x > 0.1 else "forehand")).lower(),
+          "shotType": str(payload.get("shotType") or payload.get("swingType") or ("lob" if is_toss else "topspin")).lower(),
+          "speed": _num(payload.get("speed"), 1.0),
+          "angleX": angle_x,
+          "dirX": angle_x,
+          "dirY": _num(payload.get("dirY"), -0.9 if is_toss else -0.45),
+          "pitch": _num(payload.get("pitch", self._orientation["pitch"])),
+          "roll": _num(payload.get("roll", self._orientation["roll"])),
+          "yaw": _num(payload.get("yaw", self._orientation["yaw"])),
+          "timestamp": _num(payload.get("timestamp"), now),
+          "serverTimeMs": now,
+          "source": str(payload.get("source") or "phone"),
+      }
+      self._last_swing = swing
+      self._swing_history.append(swing)
+      del self._swing_history[:-50]
+      return dict(swing)
+
+  def record_telemetry(self, payload: dict) -> dict:
+    with self._lock:
+      self._last_seen_ms = _now_ms()
+      self._connected = bool(payload.get("connected", True))
+      o = self._orientation
+      self._orientation = {
+          "pitch": _num(payload.get("pitch", o["pitch"])),
+          "roll": _num(payload.get("roll", o["roll"])),
+          "yaw": _num(payload.get("yaw", o["yaw"])),
+          "accelMag": _num(payload.get("accelMag")),
+          "buttonB": bool(payload.get("buttonB", False)),
+      }
+      return {**self._orientation, "connected": self._connected}
 
   def record_feedback(self, payload: dict) -> dict:
     with self._lock:
       self._feedback_seq += 1
       self._last_feedback = {
           "seq": self._feedback_seq,
-          "grade": str(payload.get("grade", "GOOD")),
-          "swingType": str(payload.get("swingType", "flat")),
-          "speedKmh": int(payload.get("speedKmh", 95)),
-          "isServe": bool(payload.get("isServe", False)),
-          "timestamp": time.time(),
+          "role": self.role,
+          "kind": str(payload.get("kind") or "hit"),
+          "grade": str(payload.get("grade") or "PERFECT"),
+          "shotType": str(payload.get("shotType") or "TOPSPIN"),
+          "speedKmh": _num(payload.get("speedKmh"), 160),
+          "intensity": _num(payload.get("intensity"), 1.0),
+          "serverTimeMs": _now_ms(),
       }
       return dict(self._last_feedback)
 
-  def record_swing(self, payload: dict) -> dict:
-    with self._lock:
-      self._seq += 1
-      self._last_heartbeat = time.time()
-      self._connected_clients = max(1, self._connected_clients)
-
-      raw_type = str(payload.get("swingType", payload.get("type", "flat"))).lower()
-      if raw_type not in ("flat", "topspin", "slice", "lob", "power"):
-        raw_type = "flat"
-
-      try:
-        speed = float(payload.get("speed", 1.0))
-      except (TypeError, ValueError):
-        speed = 1.0
-      speed = max(0.35, min(1.85, speed))
-
-      try:
-        aim_x = float(payload.get("aimX", 0.0))
-      except (TypeError, ValueError):
-        aim_x = 0.0
-      aim_x = max(-1.0, min(1.0, aim_x))
-
-      try:
-        wrist_pitch = float(payload.get("wristPitch", 0.0))
-      except (TypeError, ValueError):
-        wrist_pitch = 0.0
-      try:
-        wrist_roll = float(payload.get("wristRoll", 0.0))
-      except (TypeError, ValueError):
-        wrist_roll = 0.0
-      try:
-        accel_peak = float(payload.get("accelPeak", speed * 18.0))
-      except (TypeError, ValueError):
-        accel_peak = speed * 18.0
-
-      self._last_swing = {
-          "seq": self._seq,
-          "role": self.role,
-          "swingType": raw_type,
-          "speed": round(speed, 3),
-          "aimX": round(aim_x, 3),
-          "wristPitch": round(wrist_pitch, 1),
-          "wristRoll": round(wrist_roll, 1),
-          "accelPeak": round(accel_peak, 1),
-          "serve": bool(payload.get("serve", False)),
-          "timestamp": self._last_heartbeat,
-      }
-      self._telemetry_seq += 1
-      self._last_telemetry = {
-          "seq": self._telemetry_seq,
-          "swingType": raw_type,
-          "wristPitch": round(wrist_pitch, 1),
-          "wristRoll": round(wrist_roll, 1),
-          "swingSpeed": round(speed, 3),
-          "accelPeak": round(accel_peak, 1),
-          "aimX": round(aim_x, 3),
-          "timestamp": self._last_heartbeat,
-      }
-      return dict(self._last_swing)
-
-  def record_telemetry(self, payload: dict) -> dict:
-    with self._lock:
-      now = time.time()
-      self._last_heartbeat = now
-      self._connected_clients = max(1, self._connected_clients)
-      self._telemetry_seq += 1
-      self._last_telemetry = {
-          "seq": self._telemetry_seq,
-          "swingType": str(payload.get("swingType", "flat")).lower(),
-          "wristPitch": round(float(payload.get("wristPitch", 0.0) or 0.0), 1),
-          "wristRoll": round(float(payload.get("wristRoll", 0.0) or 0.0), 1),
-          "swingSpeed": round(float(payload.get("swingSpeed", 0.0) or 0.0), 3),
-          "accelPeak": round(float(payload.get("accelPeak", 0.0) or 0.0), 1),
-          "aimX": round(float(payload.get("aimX", 0.0) or 0.0), 3),
-          "timestamp": now,
-      }
-      return dict(self._last_telemetry)
-
   def get_state(self) -> dict:
     with self._lock:
-      now = time.time()
-      active = (now - self._last_heartbeat) < 25.0
+      now = _now_ms()
+      last_seen = now - self._last_seen_ms if self._last_seen_ms else -1
+      connected = self._connected and 0 <= last_seen < self.CONNECTED_WINDOW_MS
       return {
           "ok": True,
           "role": self.role,
-          "connected": active,
+          "connected": connected,
+          "lastSeenMs": last_seen,
           "seq": self._seq,
-          "lastSwing": self._last_swing,
-          "telemetrySeq": self._telemetry_seq,
-          "telemetry": self._last_telemetry,
+          "orientation": {**self._orientation, "connected": connected},
+          "lastSwing": dict(self._last_swing) if self._last_swing else None,
+          "swingHistory": [dict(s) for s in self._swing_history[-15:]],
           "feedbackSeq": self._feedback_seq,
-          "lastFeedback": self._last_feedback,
-          "serverTime": now,
+          "lastFeedback": dict(self._last_feedback) if self._last_feedback else None,
       }
 
 
 class MatchRoom:
   """Represents a live 1v1 or solo court room with P1 & P2 rackets + synced court state."""
+
+  DESKTOP_ONLINE_WINDOW_MS = 8000
 
   def __init__(self, room_id: str, host_name: str = "Player 1", guest_name: str = "Player 2", games_to_win: int = 2):
     self.room_id = room_id
@@ -183,58 +167,62 @@ class MatchRoom:
         "p2": RacketRelayState("p2"),
     }
     self._lock = threading.Lock()
-    self._match_seq = 0
-    self._match_snapshot = None
-    self._p1_desktop_heartbeat = 0.0
-    self._p2_desktop_heartbeat = 0.0
+    self._snapshot_seq = 0
+    self._snapshot = None
+    self._p1_desktop_seen_ms = 0
+    self._p2_desktop_seen_ms = 0
 
   def get_racket(self, role: str) -> RacketRelayState:
-    norm = "p2" if str(role or "").lower() in ("p2", "2", "opponent", "guest") else "p1"
-    return self.rackets[norm]
+    return self.rackets["p2" if _is_p2(role) else "p1"]
 
-  def update_match_snapshot(self, payload: dict) -> dict:
+  def update_match_snapshot(self, snapshot: dict) -> int:
     with self._lock:
-      self._match_seq += 1
-      self._p1_desktop_heartbeat = time.time()
-      self._match_snapshot = {
-          "seq": self._match_seq,
-          "timestamp": self._p1_desktop_heartbeat,
-          "state": payload,
-      }
-      return dict(self._match_snapshot)
+      self._snapshot_seq += 1
+      self._p1_desktop_seen_ms = _now_ms()
+      base = snapshot if isinstance(snapshot, dict) else {}
+      self._snapshot = {**base, "seq": self._snapshot_seq, "serverTimeMs": self._p1_desktop_seen_ms}
+      return self._snapshot_seq
 
   def touch_desktop_role(self, role: str, player_name: str = ""):
     with self._lock:
-      now = time.time()
-      if str(role or "").lower() in ("p2", "2", "opponent", "guest"):
-        self._p2_desktop_heartbeat = now
+      if _is_p2(role):
+        self._p2_desktop_seen_ms = _now_ms()
         if player_name:
           self.guest_name = player_name[:20]
       else:
-        self._p1_desktop_heartbeat = now
+        self._p1_desktop_seen_ms = _now_ms()
         if player_name:
           self.host_name = player_name[:20]
 
   def get_room_state(self) -> dict:
-    p1_state = self.rackets["p1"].get_state()
-    p2_state = self.rackets["p2"].get_state()
+    p1 = self.rackets["p1"].get_state()
+    p2 = self.rackets["p2"].get_state()
     with self._lock:
-      now = time.time()
+      now = _now_ms()
+      p1_online = self._p1_desktop_seen_ms > 0 and now - self._p1_desktop_seen_ms < self.DESKTOP_ONLINE_WINDOW_MS
+      p2_online = self._p2_desktop_seen_ms > 0 and now - self._p2_desktop_seen_ms < self.DESKTOP_ONLINE_WINDOW_MS
       return {
           "ok": True,
           "roomId": self.room_id,
           "hostName": self.host_name,
           "guestName": self.guest_name,
           "gamesToWin": self.games_to_win,
-          "p1Connected": p1_state["connected"],
-          "p2Connected": p2_state["connected"],
-          "p1DesktopOnline": (now - self._p1_desktop_heartbeat) < 12.0,
-          "p2DesktopOnline": (now - self._p2_desktop_heartbeat) < 12.0,
-          "p1Racket": p1_state,
-          "p2Racket": p2_state,
-          "matchSeq": self._match_seq,
-          "matchSnapshot": self._match_snapshot,
-          "serverTime": now,
+          "p1Online": p1_online,
+          "p2Online": p2_online,
+          "p1DesktopOnline": p1_online,
+          "p2DesktopOnline": p2_online,
+          "p1PhoneConnected": p1["connected"],
+          "p2PhoneConnected": p2["connected"],
+          "p1Connected": p1["connected"],
+          "p2Connected": p2["connected"],
+          "p1": p1,
+          "p2": p2,
+          "rackets": {"p1": p1, "p2": p2},
+          "p1Racket": p1,
+          "p2Racket": p2,
+          "snapshotSeq": self._snapshot_seq,
+          "snapshot": dict(self._snapshot) if self._snapshot else None,
+          "serverTimeMs": now,
       }
 
 
@@ -297,7 +285,7 @@ class RoomAndTunnelManager:
     rid = quote(room.room_id)
     p1_companion = f"{base}/companion.html?room={rid}&role=p1"
     p2_companion = f"{base}/companion.html?room={rid}&role=p2"
-    return {
+    links = {
         "roomId": room.room_id,
         "desktopBaseUrl": base,
         "tunnelBaseUrl": base,
@@ -309,6 +297,9 @@ class RoomAndTunnelManager:
         "p1QrImageUrl": f"https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=10&format=png&data={quote(p1_companion, safe='')}",
         "p2QrImageUrl": f"https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=10&format=png&data={quote(p2_companion, safe='')}",
     }
+    links["p1QrUrl"] = links["p1QrImageUrl"]
+    links["p2QrUrl"] = links["p2QrImageUrl"]
+    return links
 
 
 MANAGER = RoomAndTunnelManager()
@@ -377,23 +368,26 @@ class ArgonTennisRequestHandler(SimpleHTTPRequestHandler):
 
     if route in ("/api/racket/state", "/api/racket/poll"):
       room = MANAGER.get_or_create_room(room_id)
-      racket = room.get_racket(role)
-      state = racket.get_state()
-      room_state = room.get_room_state()
+      state = room.get_racket(role).get_state()
+      links = MANAGER.build_room_links(room, request_host=self.headers.get("Host", ""))
       state["roomId"] = room.room_id
-      state["p1Connected"] = room_state["p1Connected"]
-      state["p2Connected"] = room_state["p2Connected"]
       state["tunnelUrl"] = MANAGER.get_tunnel_url()
+      state["match"] = {"roomId": room.room_id, "urls": links}
       self._send_json(HTTPStatus.OK, state)
       return
 
     if route == "/api/match/state":
       room = MANAGER.get_or_create_room(room_id)
       qs = parse_qs(parsed.query)
-      if qs.get("desktop") == ["1"]:
-        room.touch_desktop_role(role, player_name=(qs.get("name") or [""])[0])
+      # Desktop game clients poll with touch=1 (or touch=p1/p2, desktop=1) to mark themselves online.
+      touch = (qs.get("touch") or qs.get("desktop") or [""])[0].lower()
+      if touch:
+        touch_role = touch if touch in ("p1", "p2") else role
+        room.touch_desktop_role(touch_role, player_name=(qs.get("name") or [""])[0])
       state = room.get_room_state()
-      state["links"] = MANAGER.build_room_links(room, request_host=self.headers.get("Host", ""))
+      links = MANAGER.build_room_links(room, request_host=self.headers.get("Host", ""))
+      state["links"] = links
+      state["urls"] = links
       state["tunnelUrl"] = MANAGER.get_tunnel_url()
       self._send_json(HTTPStatus.OK, state)
       return
@@ -415,23 +409,27 @@ class ArgonTennisRequestHandler(SimpleHTTPRequestHandler):
 
     if route == "/api/racket/swing":
       room = MANAGER.get_or_create_room(room_id)
-      swing = room.get_racket(role).record_swing(payload)
-      self._send_json(HTTPStatus.OK, {"ok": True, "roomId": room.room_id, "role": role, "swing": swing})
+      racket = room.get_racket(role)
+      swing = racket.record_swing(payload)
+      self._send_json(
+          HTTPStatus.OK,
+          {"ok": True, "roomId": room.room_id, "role": racket.role, "seq": swing["seq"], "swing": swing,
+           "lastFeedback": racket.get_state()["lastFeedback"]},
+      )
       return
 
     if route in ("/api/racket/heartbeat", "/api/racket/telemetry"):
       room = MANAGER.get_or_create_room(room_id)
-      tel = room.get_racket(role).record_telemetry(payload)
-      state = room.get_racket(role).get_state()
+      racket = room.get_racket(role)
+      orientation = racket.record_telemetry(payload)
       self._send_json(
           HTTPStatus.OK,
           {
               "ok": True,
               "roomId": room.room_id,
-              "role": role,
-              "telemetry": tel,
-              "feedbackSeq": state["feedbackSeq"],
-              "lastFeedback": state["lastFeedback"],
+              "role": racket.role,
+              "orientation": orientation,
+              "lastFeedback": racket.get_state()["lastFeedback"],
           },
       )
       return
@@ -473,17 +471,11 @@ class ArgonTennisRequestHandler(SimpleHTTPRequestHandler):
 
     if route == "/api/match/sync":
       room = MANAGER.get_or_create_room(room_id)
-      snap = room.update_match_snapshot(payload.get("snapshot") or payload)
-      p2_racket = room.get_racket("p2").get_state()
+      snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else payload
+      seq = room.update_match_snapshot(snapshot)
       self._send_json(
           HTTPStatus.OK,
-          {
-              "ok": True,
-              "roomId": room.room_id,
-              "seq": snap["seq"],
-              "p2Racket": p2_racket,
-              "p2DesktopOnline": room.get_room_state()["p2DesktopOnline"],
-          },
+          {"ok": True, "roomId": room.room_id, "seq": seq, "p2Racket": room.get_racket("p2").get_state()},
       )
       return
 
