@@ -38,18 +38,23 @@ Requirements:
 - **The phone must be able to reach the server.** `localhost` on your computer is not reachable from your phone.
 - **The page must be served over HTTPS.** Browsers only expose the motion sensors on secure pages, so `http://192.168.x.x:8080` loads but the gyro won't work.
 
-The easiest setup is an HTTPS tunnel from the computer running the game:
+**Run it locally with your phone (no hosting).** The game runs on your computer. `cloudflared` just gives it a
+temporary https link, which disappears when you stop the script.
 
 ```bash
-# terminal 1: get a public https URL for port 8080 (either one)
-cloudflared tunnel --url http://localhost:8080      # prints https://<random>.trycloudflare.com
-ngrok http 8080                                     # prints https://<random>.ngrok-free.app
-
-# terminal 2: start the server with that URL, so the QR code points at it
-cd argon-tennis && TUNNEL_URL=https://<random>.trycloudflare.com ./start.sh
+brew install cloudflared            # Windows: winget install --id Cloudflare.cloudflared
+cd argon-tennis && ./play-with-phone.sh
 ```
 
-Then open the game (`http://localhost:8080` works on the desktop), click **Pocket Racket**, and scan the QR code. The server's QR link defaults to `http://localhost:8080`. You can also set it while the server is running: `curl -X POST localhost:8080/api/tunnel/url -d '{"tunnelUrl":"https://<random>.trycloudflare.com"}'`.
+The script starts the server and the tunnel, points the in-game QR code at the https link, and prints both links.
+Open `http://localhost:8080`, start a match, click **Pocket Racket**, scan the code and tap **Enable Gyro**.
+
+To do it by hand instead: run `cloudflared tunnel --url http://localhost:8080` (or `ngrok http 8080`), then start the
+server with `TUNNEL_URL=https://<that-url> ./start.sh`.
+
+**Android only, without a tunnel:** on the phone, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`,
+add `http://<your-computer-LAN-IP>:8080`, then relaunch Chrome. Start the server with
+`TUNNEL_URL=http://<LAN-IP>:8080 ./start.sh`. Both devices must be on the same Wi-Fi. This trick doesn't exist on iPhone.
 
 ### Deploy (permanent HTTPS link, works for phones)
 
